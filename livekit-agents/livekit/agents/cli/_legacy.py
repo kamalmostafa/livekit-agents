@@ -669,8 +669,62 @@ class AgentsConsole:
         except RuntimeError:
             pass  # setting stream delay in console mode fails often, so we silently continue
 
-        sr = 24000
-        x = indata[:, 0].astype(np.float32) / 32768.0
+        self._update_input_levels(indata[:, 0].astype(np.float32) / 32768.0, 24000)
+
+        if not self._io_acquired:
+            return
+
+        FRAME_SAMPLES = 240  # 10ms at 24000 Hz
+        num_frames = frame_count // FRAME_SAMPLES
+
+        for i in range(num_frames):
+            start = i * FRAME_SAMPLES
+            end = start + FRAME_SAMPLES
+            capture_chunk = indata[start:end]
+
+            frame = rtc.AudioFrame(
+                data=capture_chunk.tobytes(),
+                samples_per_channel=FRAME_SAMPLES,
+                sample_rate=24000,
+                num_channels=1,
+            )
+            self._apm.process_stream(frame)
+
+            in_data_aec = np.frombuffer(frame.data, dtype=np.int16)
+            rms = np.sqrt(np.mean(in_data_aec.astype(np.float32) ** 2))
+            max_int16 = np.iinfo(np.int16).max
+            self._micro_db = 20.0 * np.log10(rms / max_int16 + 1e-6)
+
+            self._io_loop.call_soon_threadsafe(self._io_audio_input.push_frame, frame)
+
+    @property
+    def external_audio_input(self) -> io.AudioInput | None:
+        """The session's audio input when it isn't the console microphone.
+
+        Returns None when IO isn't acquired yet or when the session uses the
+        console's own microphone input.
+        """
+        with self._lock:
+            if not self._io_acquired:
+                return None
+
+            inp = self._io_session.input.audio
+            if inp is not None and inp is not self._io_audio_input:
+                return inp
+            return None
+
+    def push_input_levels(self, frame: rtc.AudioFrame) -> None:
+        """Update the input level meter from an arbitrary audio frame.
+
+        Lets custom AudioInput implementations drive the console visualizer in
+        place of the microphone.
+        """
+        samples = np.frombuffer(frame.data, dtype=np.int16)
+        if frame.num_channels > 1:
+            samples = samples.reshape(-1, frame.num_channels)[:, 0]
+        self._update_input_levels(samples.astype(np.float32) / 32768.0, frame.sample_rate)
+
+    def _update_input_levels(self, x: np.ndarray, sr: int) -> None:
         n = x.size
         x *= np.hanning(n).astype(np.float32)
 
@@ -701,32 +755,6 @@ class AgentsConsole:
         with self._input_lock:
             prev = self._input_levels.astype(np.float32)
             self._input_levels = np.maximum(lev, prev * decay)
-
-        if not self._io_acquired:
-            return
-
-        FRAME_SAMPLES = 240  # 10ms at 24000 Hz
-        num_frames = frame_count // FRAME_SAMPLES
-
-        for i in range(num_frames):
-            start = i * FRAME_SAMPLES
-            end = start + FRAME_SAMPLES
-            capture_chunk = indata[start:end]
-
-            frame = rtc.AudioFrame(
-                data=capture_chunk.tobytes(),
-                samples_per_channel=FRAME_SAMPLES,
-                sample_rate=24000,
-                num_channels=1,
-            )
-            self._apm.process_stream(frame)
-
-            in_data_aec = np.frombuffer(frame.data, dtype=np.int16)
-            rms = np.sqrt(np.mean(in_data_aec.astype(np.float32) ** 2))
-            max_int16 = np.iinfo(np.int16).max
-            self._micro_db = 20.0 * np.log10(rms / max_int16 + 1e-6)
-
-            self._io_loop.call_soon_threadsafe(self._io_audio_input.push_frame, frame)
 
     def _sd_output_callback(self, outdata: np.ndarray, frames: int, time: Any, *_: Any) -> None:
         if not self.io_acquired:
@@ -1443,10 +1471,15 @@ def _audio_mode(c: AgentsConsole, *, input_device: str | None, output_device: st
     listener = threading.Thread(target=_listen_for_keys, daemon=True)
     listener.start()
 
-    c.set_microphone_enabled(True, device=input_device)
+    # when the session uses a custom audio input, leave the microphone closed;
+    # the input level meter is then driven via push_input_levels() instead
+    ext_input = c.external_audio_input
+    if ext_input is None:
+        c.set_microphone_enabled(True, device=input_device)
     c.set_speaker_enabled(True, device=output_device)
 
-    visualizer = FrequencyVisualizer(c, label=c.input_name or "unknown")
+    label = ext_input.label if ext_input is not None else c.input_name
+    visualizer = FrequencyVisualizer(c, label=label or "unknown")
     visualizer.update()
 
     with Live(visualizer, console=c.console, refresh_per_second=12, transient=True):

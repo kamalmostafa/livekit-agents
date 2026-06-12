@@ -723,9 +723,9 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
 
             c = cli.AgentsConsole.get_instance()
             if c.enabled and not c.io_acquired:
-                if self.input.audio is not None or self.output.audio is not None:
+                if self.output.audio is not None:
                     logger.warning(
-                        "agent started with the console subcommand, but input.audio/output.audio "
+                        "agent started with the console subcommand, but output.audio "
                         "is already set, overriding..."
                     )
 

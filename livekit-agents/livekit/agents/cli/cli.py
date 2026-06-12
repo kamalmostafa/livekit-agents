@@ -183,14 +183,35 @@ class AgentsConsole:
             if self._io_session != sess or self._console_mode != mode:
                 return
 
+            # a user-provided audio input (e.g. set on the session before start)
+            # is left untouched; the console only manages its own audio input
+            custom_input = sess.input.audio is not None and sess.input.audio is not audio_input
+
             if mode == "text":
-                sess.input.audio = None
+                if not custom_input:
+                    sess.input.audio = None
                 sess.output.audio = None
                 sess.output.transcription = None
             else:
-                sess.input.audio = audio_input
+                if not custom_input:
+                    sess.input.audio = audio_input
                 sess.output.audio = audio_output
                 sess.output.transcription = text_output
+
+    @property
+    def external_audio_input(self) -> io.AudioInput | None:
+        """The session's audio input when it isn't the console's own input."""
+        with self._lock:
+            if not self._io_acquired:
+                return None
+
+            inp = self._io_session.input.audio
+            if inp is not None and inp is not self._io_audio_input:
+                return inp
+            return None
+
+    def push_input_levels(self, frame: Any) -> None:
+        """No-op in TCP console mode; the Go CLI renders its own level meter."""
 
 
 def _run_tcp_console(*, server: AgentServer, connect_addr: str, record: bool = False) -> None:

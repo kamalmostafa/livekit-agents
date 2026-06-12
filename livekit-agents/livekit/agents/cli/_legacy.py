@@ -513,13 +513,19 @@ class AgentsConsole:
             if self._io_session != sess or self._console_mode != mode:
                 return
 
+            # a user-provided audio input (e.g. set on the session before start)
+            # is left untouched; the console only manages its own microphone input
+            custom_input = sess.input.audio is not None and sess.input.audio is not audio_input
+
             if mode == "text":
-                sess.input.audio = None
+                if not custom_input:
+                    sess.input.audio = None
                 sess.output.audio = None
                 sess.output.transcription = None
                 self._log_handler.addFilter(self._text_mode_log_filter)
             else:
-                sess.input.audio = audio_input
+                if not custom_input:
+                    sess.input.audio = audio_input
                 sess.output.audio = audio_output
                 sess.output.transcription = text_output
                 self._log_handler.removeFilter(self._text_mode_log_filter)
